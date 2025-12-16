@@ -1,0 +1,524 @@
+name: 'Terraform pipeline for data-collection system'
+
+on:
+  push:
+    branches: ["feature/fix-ghactions-pipeline" ]
+  pull_request:
+    branches: ["feature/fix-ghactions-pipeline" ]
+
+env:
+  STAGE: development
+  TERRAFORM_VERSION: 1.7.3
+  SYSTEM_DIR: systems/data-collection
+
+permissions:
+    contents: read
+
+jobs:
+    terraform:
+        name: 'Terraform'
+        runs-on: ubuntu-latest
+        environment: development
+
+        defaults:
+            run:
+                shell: bash
+                working-directory: ${{ env.SYSTEM_DIR }}
+        env:
+            TF_WORKSPACE: development
+
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup Workspace
+            run: |
+              echo "Environment variables:"
+              echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+              echo "Current directory: $(pwd)"
+
+          - name: Install tfenv
+            run: |
+              git clone --depth=1 https://github.com/tfutils/tfenv.git $GITHUB_WORKSPACE/.bin/tfenv
+              chmod +x $GITHUB_WORKSPACE/.bin/tfenv/bin/*
+              echo "$GITHUB_WORKSPACE/.bin/tfenv/bin" >> $GITHUB_PATH
+              $GITHUB_WORKSPACE/.bin/tfenv/bin/tfenv install $TERRAFORM_VERSION
+              $GITHUB_WORKSPACE/.bin/tfenv/bin/tfenv use $TERRAFORM_VERSION
+              echo "Verifying terraform installation..."
+              $GITHUB_WORKSPACE/.bin/tfenv/bin/terraform --version
+
+          - name: Install pre-commit
+            run: |
+              python -m pip install pre-commit
+              pre-commit install
+
+          - name: Install ECS CLI
+            run: |
+              mkdir -p $GITHUB_WORKSPACE/.bin
+              curl -o $GITHUB_WORKSPACE/.bin/ecs https://amazon-ecs-cli.s3.amazonaws.com/ecs-cli-linux-amd64-latest
+              chmod +x $GITHUB_WORKSPACE/.bin/ecs
+              echo "$GITHUB_WORKSPACE/.bin" >> $GITHUB_PATH
+
+          - name: Set up AWS CLI
+            uses: aws-actions/configure-aws-credentials@v4
+            with:
+              aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+              aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+              aws-region: eu-west-2
+
+          # - name: Create AWS profile for Terraform
+          #   run: |
+          #     mkdir -p ~/.aws
+          #     echo "[my-aws-profile]" > ~/.aws/credentials
+          #     echo "aws-access-key-id=${AWS_ACCESS_KEY_ID}" >> ~/.aws/credentials
+          #     echo "aws-secret-access-key=${AWS_SECRET_ACCESS_KEY}" >> ~/.aws/credentials
+          #     # echo "aws-region=${AWS_REGION}" >> ~/.aws/credentials
+          #     # if [ -n "${AWS_SESSION_TOKEN}" ]; then
+          #     #   echo "aws_session_token=${AWS_SESSION_TOKEN}" >> ~/.aws/credentials
+          #     # fi
+          #   env:
+          #     AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          #     AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          #     # AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+          - name: Authenticate with GitHub CLI
+            run: |
+              if ! gh auth status --hostname github.com > /dev/null 2>&1; then
+                echo "Not authenticated. Logging in..."
+                gh auth login --hostname github.com --web --git-protocol ssh --skip-ssh-key --scopes user:email
+              else
+                echo "Already authenticated with GitHub CLI."
+              fi
+              echo "GITHUB_TOKEN=$(gh auth token --hostname github.com)" >> $GITHUB_ENV
+
+          # - name: Clean Terraform and Node.js artifacts
+          #   run: |
+          #     echo "Cleaning up old Terraform and Node.js artifacts..."
+          #     echo "Current directory: $(pwd)"
+
+          #     # Save current directory and go two levels up
+          #     pushd ../..
+
+          #     # Run cleanup commands from two levels up
+          #     rm -rf modules/application/notification-code-dist
+          #     rm -rf modules/storage/code/efs-sync-collection/node_modules
+          #     rm -rf modules/monitoring/modules/s3-to-cloudwatch/code/node_modules
+
+          #     # Return to original directory
+          #     popd
+
+          #     # Continue cleanup in original directory
+          #     rm -rf .bin/
+          #     rm -rf .terraform/
+
+          - name: Check Config Files
+            run: |
+              echo "Current directory: $(pwd)"
+              echo "Checking for configuration files..."
+              ls -la environments/
+
+              if [ ! -f "environments/${{ env.STAGE }}.tfvars" ]; then
+                echo "Error: environments/${{ env.STAGE }}.tfvars not found"
+                ls -la environments/
+                exit 1
+              fi
+              if [ ! -f "environments/${{ env.STAGE }}.tfbackend" ]; then
+                echo "Error: environments/${{ env.STAGE }}.tfbackend not found"
+                ls -la environments/
+                exit 1
+              fi
+
+              echo "Verifying access to S3 backend bucket..."
+              aws s3 ls s3://digital-land-terraform-remote-state/dl-dev-data-collection.tfstate
+              if [ $? -ne 0 ]; then
+                echo "Error: Unable to access S3 backend bucket"
+                exit 1
+              fi
+              # echo "Fetching current state file for verification from AWS..."
+              # aws s3 cp s3://digital-land-terraform-remote-state/dl-dev-data-collection.tfstate - | jq .
+              # echo "Checking bucket location..."
+              # aws s3api get-bucket-location --bucket digital-land-terraform-remote-state
+
+          # - name: Run Terraform commands for Core system
+          #   run: |
+          #     echo "Current directory: $(pwd)"
+          #     echo "Listing files in current directory:"
+          #     ls -la
+          #     cd $GITHUB_WORKSPACE/systems/core
+
+          #     echo "Listing files in core system directory:"
+          #     ls -la
+
+          #     echo "Initializing terraform..."
+          #     terraform init \
+          #       -backend-config="environments/${{ env.STAGE }}.tfbackend"
+
+          #     echo "Running terraform plan..."
+          #     terraform plan \
+          #       -var-file="environments/development.tfvars" \
+          #       -var "stage=development" \
+          #       -var "domain=development.planning.data.gov.uk" \
+          #       -input=false \
+          #       -out="tfplan.out" \
+          #       -no-color
+
+          #     echo "Running terraform apply..."
+          #     # terraform apply -var-file="environments/${{ env.STAGE }}.tfvars" -auto-approve -no-color
+
+
+          - name: Install dependencies for make
+            run: sudo apt-get update && sudo apt-get install -y make
+
+          - name: Clean build artifacts using make
+            run: |
+
+              echo "Current directory: $(pwd)"
+              make clean
+
+              echo "Changing to core system directory: "
+              cd $GITHUB_WORKSPACE/systems/core
+              make clean
+
+          - name: Terraform Init
+            run: |
+
+              echo "Running terraform version check..."
+              terraform --version
+
+              echo "Checking paths..."
+              echo "Current directory: $(pwd)"
+
+              echo "Initializing terraform for data-collection system..."
+
+              # echo "Running terraform init with backend config..."
+              # TF_LOG=DEBUG terraform init \
+              #   -backend-config="environments/${{ env.STAGE }}.tfbackend"
+
+              echo "Running make init..."
+              make init STAGE=${{ env.STAGE }}
+
+              echo "Verifying terraform init files..."
+              echo "Contents of .terraform directory:"
+              ls -la .terraform/
+              echo "Contents of .terraform/providers/registry.terraform.io directory:"
+              ls -la .terraform/providers/registry.terraform.io
+
+              echo "Contents of .terraform/modules/ directory:"
+              ls -la .terraform/modules/
+              echo "Contents of .terraform/modules/modules.json:"
+              cat .terraform/modules/modules.json
+
+              echo "Contents of .terraform/terraform.tfstate:"
+              cat .terraform/terraform.tfstate
+
+              echo "Showing current terraform state..."
+              terraform show
+
+          - name: Terraform Format
+            run: terraform fmt -check
+
+          - name: Terraform Refresh State
+            if: github.event_name == 'push'
+            run: |
+              # echo "Running terraform refresh..."
+              # terraform refresh -var-file="environments/${{ env.STAGE }}.tfvars" -no-color
+
+              echo "Running make refresh..."
+              make refresh STAGE=${{ env.STAGE }}
+            continue-on-error: true
+
+          - name: List AWS resource duplicates with timestamps (where possible)
+            run: |
+              echo "Listing EFS File Systems with creation time..."
+              aws efs describe-file-systems \
+                --query "FileSystems[*].{ID:FileSystemId,Name:Name,CreatedAt:CreationTime}" \
+                --output table
+
+              echo "Listing Route 53 Hosted Zones (no creation time available)..."
+              aws route53 list-hosted-zones \
+                --query "HostedZones[*].{ID:Id,Name:Name}" \
+                --output table
+
+              echo "Listing VPCs (no creation time available)..."
+              aws ec2 describe-vpcs \
+                --query "Vpcs[*].{ID:VpcId,Name:Tags[?Key=='Name']|[0].Value}" \
+                --output table
+
+              echo "Listing Security Groups (no creation time available)..."
+              aws ec2 describe-security-groups \
+                --query "SecurityGroups[*].{ID:GroupId,Name:GroupName}" \
+                --output table
+            shell: bash
+
+          - name: Delete EFS mount targets and file system safely from AWS
+            run: |
+          #     # FILE_SYSTEM_ID=fs-0ed53d4376c72c22b -- DELETED ALONG WITH MOUNT TARGETS
+
+          #     # echo "Fetching mount targets for $FILE_SYSTEM_ID..."
+          #     # MOUNT_TARGETS=$(aws efs describe-mount-targets \
+          #     #   --file-system-id $FILE_SYSTEM_ID \
+          #     #   --query "MountTargets[*].MountTargetId" \
+          #     #   --output text)
+
+          #     # if [ -z "$MOUNT_TARGETS" ]; then
+          #     #   echo "No mount targets found. Proceeding to delete file system..."
+          #     # else
+          #     #   echo "Deleting mount targets..."
+          #     #   for mt in $MOUNT_TARGETS; do
+          #     #     echo "Deleting mount target $mt..."
+          #     #     aws efs delete-mount-target --mount-target-id $mt || echo "Failed to delete $mt"
+          #     #   done
+
+          #     #   echo "Waiting for mount targets to be deleted..."
+          #     #   while true; do
+          #     #     REMAINING=$(aws efs describe-mount-targets \
+          #     #       --file-system-id $FILE_SYSTEM_ID \
+          #     #       --query "MountTargets[*].MountTargetId" \
+          #     #       --output text)
+          #     #     if [ -z "$REMAINING" ]; then
+          #     #       echo "All mount targets deleted."
+          #     #       break
+          #     #     else
+          #     #       echo "Still waiting... mount targets remaining: $REMAINING"
+          #     #       sleep 10
+          #     #     fi
+          #     #   done
+          #     # fi
+
+          #     # echo "Deleting file system $FILE_SYSTEM_ID..."
+          #     # aws efs delete-file-system --file-system-id $FILE_SYSTEM_ID || echo "Failed to delete file system"
+
+          #     echo "Listing EFS File Systems with creation time..."
+          #     aws efs describe-file-systems \
+          #       --query "FileSystems[*].{ID:FileSystemId,Name:Name,CreatedAt:CreationTime}" \
+          #       --output table
+          #   shell: bash
+
+          # - name: Lookup creation events for Route 53 Hosted Zones by domain name
+          #     run: |
+          #       HOSTED_ZONES=(
+          #         Z0110918FNOYM7LPAK6T
+          #         Z01010362J57KVQSVD6CH
+          #         Z07614313B6HWF3Q521TP
+          #         Z00070471GOA8ONM5L9TX
+          #         Z08713173KT2PNJR2S6Q5
+          #         Z087131914345DEQVDP3Y
+          #       )
+
+          #       for ZONE_ID in "${HOSTED_ZONES[@]}"; do
+          #         DOMAIN=$(aws route53 get-hosted-zone --id $ZONE_ID --query 'HostedZone.Name' --output text)
+          #         echo "🔍 Looking up creation event for domain: $DOMAIN (Hosted Zone ID: $ZONE_ID)"
+          #         aws cloudtrail lookup-events \
+          #           --lookup-attributes AttributeKey=ResourceName,AttributeValue=$DOMAIN \
+          #           --query "Events[*].{Time:EventTime,Name:EventName}" \
+          #           --output table
+          #       done
+          #     shell: bash
+
+
+          - name: Lookup VPC creation/modification events via CloudTrail
+            run: |
+            #   for vpc_id in vpc-006aa3d3ff018e294 vpc-0f64a021c657eeff1 vpc-d4cabfbc; do
+            #     echo "Looking up CloudTrail events for VPC: $vpc_id"
+            #     aws cloudtrail lookup-events \
+            #       --lookup-attributes AttributeKey=ResourceName,AttributeValue=$vpc_id \
+            #       --query "Events[*].{Time:EventTime,Name:EventName}" \
+            #       --output table
+            #   done
+            # shell: bash
+
+          - name: Describe VPC Resources
+            run: |
+              # echo "🔍 Describing resources in VPC: vpc-006aa3d3ff018e294"
+
+              # aws ec2 describe-subnets --filters Name=vpc-id,Values=vpc-006aa3d3ff018e294 --query 'Subnets[*].SubnetId' --output table
+              # aws ec2 describe-route-tables --filters Name=vpc-id,Values=vpc-006aa3d3ff018e294 --query 'RouteTables[*].RouteTableId' --output table
+              # aws ec2 describe-internet-gateways --filters Name=attachment.vpc-id,Values=vpc-006aa3d3ff018e294 --query 'InternetGateways[*].InternetGatewayId' --output table
+              # aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=vpc-006aa3d3ff018e294 --query 'NetworkInterfaces[*].NetworkInterfaceId' --output table
+              # aws ec2 describe-security-groups --filters Name=vpc-id,Values=vpc-006aa3d3ff018e294 --query 'SecurityGroups[*].GroupId' --output table
+
+          - name: Cleanup and Delete VPC Resources
+            run: |
+              VPC_ID="vpc-006aa3d3ff018e294"
+
+              # echo "🧹 Detaching and deleting resources in VPC: $VPC_ID"
+
+              # # Detach and delete Internet Gateway
+              # IGW_ID=$(aws ec2 describe-internet-gateways --filters Name=attachment.vpc-id,Values=$VPC_ID --query 'InternetGateways[0].InternetGatewayId' --output text)
+              # if [ "$IGW_ID" != "None" ]; then
+              #   aws ec2 detach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+              #   aws ec2 delete-internet-gateway --internet-gateway-id $IGW_ID
+              # fi
+
+              # # Delete Subnets
+              # for SUBNET_ID in $(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC_ID --query 'Subnets[*].SubnetId' --output text); do
+              #   aws ec2 delete-subnet --subnet-id $SUBNET_ID
+              # done
+
+              # # Delete Network Interfaces
+              # for ENI_ID in $(aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=$VPC_ID --query 'NetworkInterfaces[*].NetworkInterfaceId' --output text); do
+              #   aws ec2 delete-network-interface --network-interface-id $ENI_ID || echo "Failed to delete ENI $ENI_ID"
+              # done
+
+              # # Delete Security Groups (excluding default)
+              # for SG_ID in $(aws ec2 describe-security-groups --filters Name=vpc-id,Values=$VPC_ID --query 'SecurityGroups[*].GroupId' --output text); do
+              #   SG_NAME=$(aws ec2 describe-security-groups --group-ids $SG_ID --query 'SecurityGroups[0].GroupName' --output text)
+              #   if [ "$SG_NAME" != "default" ]; then
+              #     aws ec2 delete-security-group --group-id $SG_ID || echo "Failed to delete SG $SG_ID"
+              #   fi
+              # done
+
+              # # Finally, delete the VPC
+              # aws ec2 delete-vpc --vpc-id $VPC_ID && echo "✅ VPC deleted: $VPC_ID" || echo "❌ Failed to delete VPC: $VPC_ID"
+              # Disassociate route table associations
+              # for RTB_ID in $(aws ec2 describe-route-tables --filters Name=vpc-id,Values=$VPC_ID --query 'RouteTables[*].RouteTableId' --output text); do
+              #   ASSOCIATIONS=$(aws ec2 describe-route-tables --route-table-ids $RTB_ID --query 'RouteTables[0].Associations[?Main==`false`].RouteTableAssociationId' --output text)
+
+              #   for ASSOC_ID in $ASSOCIATIONS; do
+              #     echo "Disassociating route table $RTB_ID from association $ASSOC_ID"
+              #     aws ec2 disassociate-route-table --association-id $ASSOC_ID
+              #   done
+
+              #   echo "Deleting route table $RTB_ID"
+              #   aws ec2 delete-route-table --route-table-id $RTB_ID || echo "Failed to delete route table $RTB_ID"
+              # done
+
+
+          - name: Lookup EC2 Security Group creation/modification events via CloudTrail
+            run: |
+          #     for sg_id in sg-de7baeb0 sg-09d84dacda23ea989 sg-0400b276572646ce4 sg-008880a3f947508cf sg-0c5c7e8bf54d568c2 sg-0a612862c6ede865e sg-03beb5463845b8d00 sg-088d52ea3e4b7a445 sg-049d029a4d4863045 sg-002fd24b342305173 sg-07c583d52b8fc5782 sg-06bce050f538eb3d6 sg-00768994f2031e4bc sg-067a0890cbc6e3a22 sg-05f1ed7af3d0709ff sg-0017040473a9ce381 sg-0fe390dd951829c75 sg-0c247bc9e4858d79d sg-06aa61a5c758d7283 sg-01fa773131a2f79e2; do
+          #       echo "Looking up CloudTrail events for Security Group: $sg_id"
+          #       aws cloudtrail lookup-events \
+          #         --lookup-attributes AttributeKey=ResourceName,AttributeValue=$sg_id \
+          #         --query "Events[*].{Time:EventTime,Name:EventName}" \
+          #         --output table
+          #     done
+          #   shell: bash
+
+          - name: Delete Security Groups
+            run: |
+              # aws ec2 delete-security-group --group-id sg-09d84dacda23ea989 || echo "Failed to delete sg-09d84dacda23ea989" --DELETED
+              # aws ec2 delete-security-group --group-id sg-0400b276572646ce4 || echo "Failed to delete sg-0400b276572646ce4" --DELETED
+              # aws ec2 delete-security-group --group-id sg-088d52ea3e4b7a445 || echo "Failed to delete sg-088d52ea3e4b7a445" --DELETED
+              # aws ec2 delete-security-group --group-id sg-06aa61a5c758d7283 || echo "Failed to delete sg-06aa61a5c758d7283" --SKIPPED
+
+            #   for sg in sg-09d84dacda23ea989 sg-088d52ea3e4b7a445 sg-06aa61a5c758d7283; do
+
+            #     echo "Processing $sg..."
+
+            #     # Skip default SG
+            #     NAME=$(aws ec2 describe-security-groups --group-ids $sg --query 'SecurityGroups[0].GroupName' --output text)
+            #     if [ "$NAME" == "default" ]; then
+            #       echo "Skipping default security group: $sg"
+            #       continue
+            #     fi
+
+            #     # Find attached ENIs
+            #     ENI_IDS=$(aws ec2 describe-network-interfaces --filters Name=group-id,Values=$sg --query 'NetworkInterfaces[*].NetworkInterfaceId' --output text)
+
+            #     for eni in $ENI_IDS; do
+            #       echo "Detaching $sg from ENI $eni..."
+            #       CURRENT_GROUPS=$(aws ec2 describe-network-interfaces --network-interface-ids $eni --query 'NetworkInterfaces[0].Groups[*].GroupId' --output text)
+            #       NEW_GROUPS=$(echo $CURRENT_GROUPS | sed "s/$sg//g")
+
+            #       # Update ENI with new SG list
+            #       aws ec2 modify-network-interface-attribute --network-interface-id $eni --groups $NEW_GROUPS
+            #     done
+
+            #     # Attempt deletion
+            #     echo "Deleting $sg..."
+            #     aws ec2 delete-security-group --group-id $sg && echo "Deleted $sg" || echo "Failed to delete $sg"
+            #   done
+            # shell: bash
+
+          - name: Remove duplicate resources from Terraform state
+            run: |
+              echo "Listing current Terraform state..."
+              terraform state list
+
+              # echo "Removing duplicate EFS file system from state..."
+              # terraform state rm module.storage.aws_efs_file_system.files || echo "Resource not found or already removed"
+
+              # echo "Removing duplicate EFS mount targets from state..."
+              # terraform state rm module.storage.aws_efs_mount_target.mount[0] || echo "Mount target [0] not found"
+              # terraform state rm module.storage.aws_efs_mount_target.mount[1] || echo "Mount target [1] not found"
+              # terraform state rm module.storage.aws_efs_mount_target.mount[2] || echo "Mount target [2] not found"
+
+              # echo "Removing duplicate Route 53 zones from state..."
+              # terraform state rm module.system-context.data.aws_route53_zone.main || echo "Zone 'main' not found"
+              # terraform state rm module.system-context.data.aws_route53_zone.prototypes || echo "Zone 'prototypes' not found"
+
+              # echo "Removing duplicate VPC from state..."
+              # terraform state rm module.system-context.data.aws_vpc.main || echo "VPC 'main' not found"
+
+              # echo "Removing duplicate Security Groups from state..."
+              # terraform state rm module.system-context.data.aws_security_group.public || echo "SG 'public' not found"
+              # terraform state rm module.system-context.data.aws_security_group.private || echo "SG 'private' not found"
+              # terraform state rm module.system-context.data.aws_security_group.ecs_instance || echo "SG 'ecs_instance' not found"
+            shell: bash
+
+          - name: Terraform Refresh State
+            if: github.event_name == 'push'
+            run: |
+              # echo "Running terraform refresh..."
+              # terraform refresh -var-file="environments/${{ env.STAGE }}.tfvars" -no-color
+
+              echo "Running make refresh..."
+              make refresh STAGE=${{ env.STAGE }}
+
+          # - name: Import Existing Terraform Resources
+          #   run: |
+          #     terraform import aws_ecr_repository.task development-tile-builder
+
+          - name: Terraform Plan
+            id: plan
+            run: |
+              echo "Running terraform plan..."
+
+              echo "Verifying working directory:"
+              pwd
+
+              # echo "Contents of environments directory:"
+              # ls -la environments/
+
+              # echo "Contents of development.tfvars:"
+              # cat environments/development.tfvars
+
+              # echo "Verifying terraform files:"
+              # echo "main.tf:"
+              # cat main.tf
+              # echo "variables.tf:"
+              # cat variables.tf
+
+              # echo "Running terraform validate..."
+              # terraform validate
+
+              echo "Running plan with variables..."
+              TF_LOG=DEBUG terraform plan -var-file="environments/${{ env.STAGE }}.tfvars" -out="tfplan.out" -no-color
+
+              # terraform plan \
+              #   -var-file="environments/development.tfvars" \
+              #   -var "stage=development" \
+              #   -var "domain=development.planning.data.gov.uk" \
+              #   -var "enable_canary_screenshot=false" \
+              #   -input=false \
+              #   -out="tfplan.out" \
+              #   -no-color
+
+              echo "Running make plan..."
+              # make plan STAGE=${{ env.STAGE }}
+
+              echo "Verifying terraform plan output:"
+              terraform show -no-color tfplan.out
+
+          # - name: Terraform Apply
+          #   if: github.ref == 'refs/heads/feature/fix-ghactions-pipeline' && github.event_name == 'push'
+          #   run: |
+          #     echo "Running terraform apply..."
+          #     terraform apply -var-file="environments/${{ env.STAGE }}.tfvars" -auto-approve -no-color
+
+          - name: Terraform Output
+            if: success()
+            run: |
+              echo "Getting terraform outputs..."
+              terraform output -json
