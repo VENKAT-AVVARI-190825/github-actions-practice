@@ -18,7 +18,8 @@ jobs:
 
   deploy:
     runs-on: ubuntu-latest
-    needs: ${{ inputs.environment == 'prod' && 'e2e-tests' || '' }}
+    if: always()
+    needs: e2e-tests
     environment: ${{ inputs.environment }}
     env:
       my-env-value: ${{ vars.MY_ENV_VALUE || 'default value' }}
