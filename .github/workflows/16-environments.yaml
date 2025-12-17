@@ -2,6 +2,10 @@ name: '16 - Working with Environments'
 
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        type: environment
+        description: 'The environment to deploy to'
 
 jobs:
   deploy-staging:
